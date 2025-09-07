@@ -1,0 +1,9 @@
+{
+  "name": "chatbot-whatsapp-citas",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "googleapis": "^133.0.0"
+  }
+}
