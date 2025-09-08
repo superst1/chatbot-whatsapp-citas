@@ -38,6 +38,7 @@ export default async function handler(req, res) {
 
       // NLU con Gemini
       const nlu = await handleMessage(text);
+      
       if (nlu.intent === "crear_cita" && nlu.missing?.length > 0) {
         let reply = `📋 Para crear la cita necesito: ${nlu.missing.join(", ")}.`;
 
@@ -48,6 +49,11 @@ export default async function handler(req, res) {
         await sendWhatsAppText(from, reply);
         return res.status(200).json({ received: true, missingData: true });
         }
+        // 🧠 Procesamiento según intención
+        switch (nlu.intent) {
+        case "crear_cita":
+        // ...
+
 
       let reply = "";
       switch (nlu.intent) {
