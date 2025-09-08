@@ -50,8 +50,8 @@ export default async function handler(req, res) {
         return res.status(200).json({ received: true, missingData: true });
         }
         // 🧠 Procesamiento según intención
-        switch (nlu.intent) {
-        case "crear_cita":
+        //switch (nlu.intent) {
+        //case "crear_cita":
         // ...
 
 
