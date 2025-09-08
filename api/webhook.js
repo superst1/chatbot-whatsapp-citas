@@ -5,7 +5,7 @@ import { sendWhatsAppText } from "../lib/whatsapp.js";
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
 export default async function handler(req, res) {
-  // Verificación de Webhook (GET)
+  // Verificación de Webhook (GET)  .
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
