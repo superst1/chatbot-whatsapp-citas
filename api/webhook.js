@@ -83,7 +83,7 @@ export default async function handler(req, res) {
         }
 
         default: {
-          reply = "Hola 👋 Soy tu asistente de citas. Puedes decir:\n- “crear cita para mañana 10am a nombre de Ana”\n- “consultar 123456”\n- “actualizar 123456 a confirmada”";
+          reply = "Hola 👋 Soy MedicAsist tu asistente de citas. Puedes decir:\n- “crear cita para mañana 10am a nombre de Ana”\n- “consultar 123456”\n- “actualizar 123456 a confirmada”";
         }
       }
 
