@@ -84,22 +84,22 @@ export default async function handler(req, res) {
           break;
         }
 
-        case "reagendar_estado": {
+        case "actualizar_estado": {
           const id = nlu.data?.numero_cita || "";
           const nuevo = nlu.data?.status_cita || "";
           if (!id || !nuevo) {
-            reply = "Indica número de cita y nuevo estado. Ej: reagendar 123456 a confirmada";
+            reply = "Indica número de cita y nuevo estado. Ej: actualizar 123456 a confirmada";
             break;
           }
           const ok = await updateAppointmentStatus(id, nuevo);
           reply = ok
             ? `✅ Estado de la cita ${id} actualizado a: ${nuevo}.`
-            : `No pude reagendar la cita ${id}. Verifica el número.`;
+            : `No pude actualizar la cita ${id}. Verifica el número.`;
           break;
         }
 
         default: {
-          reply = "Hola 👋 Soy MedicAsist tu asistente de citas. Puedes decir:\n- “crear cita para mañana 10am a nombre de Ana”\n- “consultar 123456”\n- “reagendar 123456 a confirmada”";
+          reply = "Hola 👋 Soy MedicAsist tu asistente de citas. Puedes decir:\n- “crear cita para mañana 10am a nombre de Ana”\n- “consultar 123456”\n- “actualizar 123456 a confirmada”";
         }
       }
 
