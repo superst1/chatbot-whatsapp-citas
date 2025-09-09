@@ -1,11 +1,10 @@
 import { sendWhatsAppText } from "../lib/whatsapp.js";
 import {
   createAppointment,
-  updateAppointmentStatusByCedula,
   isHoraDisponible,
   getHorasDisponibles
 } from "../lib/sheets.js";
-import { callGeminiFlash } from "../lib/geminiFlash.js"; // función que llama a Gemini Flash 1.5
+import { procesarCitaConGemini } from "../lib/gemini.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const conversationState = {};
@@ -30,66 +29,48 @@ export default async function handler(req, res) {
 
       const from = msg.from;
       const text = msg.text?.body || "";
-      const profileName = req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name || "Paciente";
+      const profileName =
+        req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name ||
+        "Paciente";
 
       // Estado actual de la conversación
       const currentState = conversationState[from]?.data || {};
 
-      // Prompt a Gemini Flash 1.5
-      const prompt = `
-Eres un asistente para agendar o re-agendar citas médicas.
-Estado actual: ${JSON.stringify(currentState)}
-Mensaje nuevo: "${text}"
-
-Devuélveme un JSON con:
-{
-  "datos": {
-    "nombre_paciente": "...",
-    "numero_cedula": "...",
-    "fecha_cita": "DD/MM/YYYY",
-    "hora_cita": "HH:mm",
-    "nombre_contacto": "...",
-    "celular_contacto": "..."
-  },
-  "completo": true/false,
-  "respuesta": "Texto natural para el usuario, cordial y claro"
-}
-
-Reglas:
-- Normaliza fecha a DD/MM/YYYY y hora a HH:mm.
-- Si no tienes un dato, deja el valor vacío.
-- Si detectas re-agenda, actualiza fecha/hora.
-- Si falta algo, en "respuesta" pide solo lo que falta.
-`;
-
-      const geminiResp = await callGeminiFlash(prompt);
-      let parsed;
-      try {
-        parsed = JSON.parse(geminiResp);
-      } catch {
-        await sendWhatsAppText(from, "⚠️ Hubo un problema interpretando la respuesta. Intenta de nuevo.");
-        return res.status(200).json({ received: true });
-      }
-
-      const { datos, completo, respuesta } = parsed;
+      // Procesar con Gemini Flash 1.5
+      const { datos, completo, respuesta } = await procesarCitaConGemini(
+        currentState,
+        text
+      );
 
       if (completo) {
         // Validar disponibilidad
         const slotKey = `${datos.fecha_cita}|${datos.hora_cita}`;
         if (slotLocks.has(slotKey)) {
           const libres = await getHorasDisponibles(datos.fecha_cita);
-          await sendWhatsAppText(from, `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}`);
+          await sendWhatsAppText(
+            from,
+            `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}`
+          );
           conversationState[from] = { data: datos };
         } else {
           slotLocks.add(slotKey);
-          const disponible = await isHoraDisponible(datos.fecha_cita, datos.hora_cita);
+          const disponible = await isHoraDisponible(
+            datos.fecha_cita,
+            datos.hora_cita
+          );
           if (!disponible) {
             const libres = await getHorasDisponibles(datos.fecha_cita);
-            await sendWhatsAppText(from, `⚠️ La hora ${datos.hora_cita} ya está ocupada el ${datos.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}`);
+            await sendWhatsAppText(
+              from,
+              `⚠️ La hora ${datos.hora_cita} ya está ocupada el ${datos.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`
+            );
             conversationState[from] = { data: datos };
           } else {
             const numero_cita = await createAppointment(datos);
-            await sendWhatsAppText(from, `✅ ${datos.nombre_paciente}, tu cita para el ${datos.fecha_cita} a las ${datos.hora_cita} ha sido registrada. Nº ${numero_cita}.`);
+            await sendWhatsAppText(
+              from,
+              `✅ ${datos.nombre_paciente}, tu cita para el ${datos.fecha_cita} a las ${datos.hora_cita} ha sido registrada. Nº ${numero_cita}.`
+            );
             delete conversationState[from];
           }
           slotLocks.delete(slotKey);
