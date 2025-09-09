@@ -196,7 +196,7 @@ export default async function handler(req, res) {
           }
         } else {
           conversationState[from] = { intent: "crear_cita", data: completedData };
-          reply = `📋 Me falta: ${missing.join(", ")}).`;
+          reply = `📋 Me falta: ${missing.join(", ")}.`;
         }
 
         await sendWhatsAppText(from, reply);
