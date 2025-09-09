@@ -3,7 +3,8 @@ import {
   createAppointment,
   isHoraDisponible,
   getHorasDisponibles,
-  updateAppointmentStatusByCedula
+  updateAppointmentStatusByCedula,
+  updateAppointmentByCedula
 } from "../lib/sheets.js";
 import { procesarCitaConGemini } from "../lib/gemini.js";
 
@@ -34,16 +35,15 @@ export default async function handler(req, res) {
         req.body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name ||
         "Paciente";
 
-      // Estado actual de la conversación
       const currentState = conversationState[from]?.data || {};
 
-      // Procesar con Gemini Flash 1.5 (prompt optimizado)
+      // Procesar con Gemini (versión mejorada que limpia ```json)
       const { datos, completo, respuesta } = await procesarCitaConGemini(
         currentState,
         text
       );
 
-      // === Manejo según acción detectada ===
+      // === Cancelar cita ===
       if (datos.accion === "cancelar") {
         if (!datos.numero_cedula) {
           conversationState[from] = { data: datos };
@@ -60,12 +60,14 @@ export default async function handler(req, res) {
         return res.status(200).json({ received: true });
       }
 
+      // === Re-agendar cita ===
       if (datos.accion === "reagendar") {
         if (!completo) {
           conversationState[from] = { data: datos };
           await sendWhatsAppText(from, respuesta);
           return res.status(200).json({ received: true });
         }
+
         const slotKey = `${datos.fecha_cita}|${datos.hora_cita}`;
         if (slotLocks.has(slotKey)) {
           const libres = await getHorasDisponibles(datos.fecha_cita);
@@ -79,8 +81,15 @@ export default async function handler(req, res) {
             await sendWhatsAppText(from, `⚠️ La hora ${datos.hora_cita} ya está ocupada el ${datos.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}`);
             conversationState[from] = { data: datos };
           } else {
-            // Aquí podrías implementar updateAppointmentByCedula si quieres cambiar fecha/hora
-            await sendWhatsAppText(from, `✅ Tu cita ha sido re-agendada para el ${datos.fecha_cita} a las ${datos.hora_cita}.`);
+            const ok = await updateAppointmentByCedula(datos.numero_cedula, {
+              fecha_cita: datos.fecha_cita,
+              hora_cita: datos.hora_cita
+            });
+            if (ok) {
+              await sendWhatsAppText(from, `✅ Tu cita ha sido re-agendada para el ${datos.fecha_cita} a las ${datos.hora_cita}.`);
+            } else {
+              await sendWhatsAppText(from, `⚠️ No encontré una cita con la cédula ${datos.numero_cedula}.`);
+            }
             delete conversationState[from];
           }
           slotLocks.delete(slotKey);
