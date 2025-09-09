@@ -11,12 +11,12 @@ import { sendWhatsAppText } from "../lib/whatsapp.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Estado en memoria (se reinicia al reiniciar el servidor)
+// Estado de conversación (en memoria del runtime)
 const conversationState = {};
 
 /* ===================== Utilidades ===================== */
 
-// Parseo manual mejorado
+// Parseo manual desde texto libre
 function parseManualData(text) {
   const data = {};
 
@@ -28,29 +28,27 @@ function parseManualData(text) {
   const celularMatch = text.match(/\b09\d{8}\b/);
   if (celularMatch) data.celular_contacto = celularMatch[0];
 
-  // Fecha dd/mm/yyyy o dd-mm-yyyy (con posible hora incluida)
-  const fechaRegex = /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/;
-  const fechaMatch = text.match(fechaRegex);
-  if (fechaMatch) data.fecha_cita = fechaMatch[0];
+  // Fecha: dd/mm/yyyy o dd-mm-yyyy
+  const fechaMatch = text.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/);
+  if (fechaMatch) data.fecha_cita = normalizeFechaStr(fechaMatch[0]);
 
-  // Hora: HH:mm o H:mm, y también 1-12 am/pm
-  // Preferimos normalizar a HH:mm en 24h cuando sea posible
+  // Hora: HH:mm (24h) o 12h con am/pm
   const horaMatch24 = text.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/);
   const horaMatchAmPm = text.match(/\b(1[0-2]|0?\d)(?::([0-5]\d))?\s?(am|pm)\b/i);
   if (horaMatch24) {
     data.hora_cita = normalizeHora(horaMatch24[0]);
   } else if (horaMatchAmPm) {
     const hh = parseInt(horaMatchAmPm[1], 10);
-    const mm = horaMatchAmPm[2] ? horaMatchAmPm[2] : "00";
+    const mm = horaMatchAmPm[2] || "00";
     const period = horaMatchAmPm[3].toLowerCase();
-    data.hora_cita = to24Hour(hh, mm, period); // HH:mm
+    data.hora_cita = to24Hour(hh, mm, period);
   }
 
-  // Nombre precedido por etiqueta
+  // Nombre etiquetado
   const nombreEtiquetado = text.match(/(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i);
   if (nombreEtiquetado) data.nombre_paciente = nombreEtiquetado[1].trim();
 
-  // Nombre libre (dos o más palabras con mayúscula inicial)
+  // Nombre libre: dos o más palabras con mayúscula inicial
   if (!data.nombre_paciente) {
     const nombreLibre = text.match(/\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/);
     if (nombreLibre) data.nombre_paciente = nombreLibre[1].trim();
@@ -70,6 +68,18 @@ function to24Hour(hh, mm, period) {
   return `${String(h).padStart(2, "0")}:${mm}`;
 }
 
+function normalizeFechaStr(fecha) {
+  const partes = String(fecha).trim().split(/[\/-]/);
+  if (partes.length >= 3) {
+    const dd = partes[0].padStart(2, "0");
+    const mm = partes[1].padStart(2, "0");
+    const yyyy = partes[2].length === 2 ? `20${partes[2]}` : partes[2];
+    return `${dd}/${mm}/${yyyy}`;
+  }
+  return String(fecha).trim();
+}
+
+// Completar por defecto contacto/celular
 function applyDefaults(from, profileName, data) {
   const d = { ...data };
   if (!d.nombre_contacto && d.nombre_paciente) d.nombre_contacto = d.nombre_paciente;
@@ -77,10 +87,12 @@ function applyDefaults(from, profileName, data) {
   return d;
 }
 
+// Faltantes
 function requiredMissing(data, fields) {
   return fields.filter((f) => !data[f] || String(data[f]).trim() === "");
 }
 
+// Aleatorio
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -88,7 +100,7 @@ function pickRandom(arr) {
 /* ===================== Handler ===================== */
 
 export default async function handler(req, res) {
-  // Verificación del webhook (GET)
+  // Verificación (GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -99,14 +111,14 @@ export default async function handler(req, res) {
     return res.status(403).send("Verification failed");
   }
 
-  // Recepción de mensajes (POST)
+  // Recepción (POST)
   if (req.method === "POST") {
     try {
       const entry = req.body?.entry?.[0];
       const changes = entry?.changes?.[0];
       const value = changes?.value;
 
-      // Notificaciones de estado
+      // Estados de WhatsApp
       if (value?.statuses) {
         return res.status(200).json({ received: true, statusUpdate: true });
       }
@@ -124,7 +136,7 @@ export default async function handler(req, res) {
       // NLU
       const nlu = await handleMessage(text);
 
-      // Variaciones
+      // Estilo
       const saludos = [
         `Hola ${profileName} 👋`,
         `¡Qué gusto verte, ${profileName}!`,
@@ -144,7 +156,7 @@ export default async function handler(req, res) {
 
       let reply = "";
 
-      // Si hay flujo pendiente de crear_cita, intentamos completarlo
+      // Si hay flujo pendiente de crear_cita, intentar completar con este turno
       if (conversationState[from] && nlu.intent !== "crear_cita") {
         const prev = conversationState[from];
         const manualData = parseManualData(text);
@@ -158,30 +170,19 @@ export default async function handler(req, res) {
         }
         const completedData = applyDefaults(from, profileName, combinedData);
 
-        // Requisitos mínimos ahora incluyen hora_cita
+        // Requisitos mínimos (incluye hora)
         const requiredFields = ["nombre_paciente", "numero_cedula", "fecha_cita", "hora_cita"];
         const missing = requiredMissing(completedData, requiredFields);
 
         if (missing.length === 0) {
-          // Validar disponibilidad
+          // Verificar disponibilidad
           const disponible = await isHoraDisponible(completedData.fecha_cita, completedData.hora_cita);
           if (!disponible) {
             const libres = await getHorasDisponibles(completedData.fecha_cita);
             reply = `⚠️ La hora ${completedData.hora_cita} ya está ocupada el ${completedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
-            // Mantenemos el estado para que el usuario elija otra hora
             conversationState[from] = { intent: "crear_cita", data: completedData };
           } else {
-            const numero_cita = await createAppointment({
-              nombre_paciente: completedData.nombre_paciente,
-              numero_cedula: completedData.numero_cedula,
-              nombre_contacto: completedData.nombre_contacto,
-              celular_contacto: completedData.celular_contacto,
-              fecha_cita: completedData.fecha_cita,
-              hora_cita: completedData.hora_cita,
-              status_cita: "pendiente",
-              observaciones: completedData.observaciones || ""
-            });
-
+            const numero_cita = await createAppointment(completedData);
             reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${completedData.numero_cedula}) para el ${completedData.fecha_cita} a las ${completedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
             delete conversationState[from];
           }
@@ -194,7 +195,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ received: true });
       }
 
-      // Switch principal por intención
+      // Switch principal
       switch (nlu.intent) {
         case "crear_cita": {
           const manualData = parseManualData(text);
@@ -214,17 +215,7 @@ export default async function handler(req, res) {
               reply = `⚠️ La hora ${mergedData.hora_cita} ya está ocupada el ${mergedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
               conversationState[from] = { intent: "crear_cita", data: mergedData };
             } else {
-              const numero_cita = await createAppointment({
-                nombre_paciente: mergedData.nombre_paciente,
-                numero_cedula: mergedData.numero_cedula,
-                nombre_contacto: mergedData.nombre_contacto,
-                celular_contacto: mergedData.celular_contacto,
-                fecha_cita: mergedData.fecha_cita,
-                hora_cita: mergedData.hora_cita,
-                status_cita: "pendiente",
-                observaciones: mergedData.observaciones || ""
-              });
-
+              const numero_cita = await createAppointment(mergedData);
               reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${mergedData.numero_cedula}) para el ${mergedData.fecha_cita} a las ${mergedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
             }
           }
@@ -239,7 +230,7 @@ export default async function handler(req, res) {
           }
           const cita = await findAppointmentByCedula(cedula);
           reply = cita
-            ? `📄 Cita de ${cita.nombre_paciente || cita.nombre_paciente}\n- Fecha: ${cita.fecha_cita || ""}\n- Hora: ${cita.hora_cita || ""}\n- Estado: ${cita.status_cita || ""}\n- Obs: ${cita.observaciones || "N/A"}`
+            ? `📄 Cita de ${cita.nombre_paciente || ""}\n- Fecha: ${cita.fecha_cita || ""}\n- Hora: ${cita.hora_cita || ""}\n- Estado: ${cita.status_cita || ""}\n- Obs: ${cita.observaciones || "N/A"}`
             : `⚠️ No encontré ninguna cita con la cédula ${cedula}.`;
           break;
         }
@@ -272,7 +263,7 @@ ${instrucciones}`;
       await sendWhatsAppText(from, reply);
       return res.status(200).json({ received: true });
     } catch (err) {
-      console.error("Webhook error:", err);
+      console.error("💥 Webhook error:", err);
       return res.status(500).json({ error: "Internal error" });
     }
   }
