@@ -32,10 +32,16 @@ export default async function handler(req, res) {
       const entry = body?.entry?.[0];
       const changes = entry?.changes?.[0];
       const value = changes?.value;
-      const messages = value?.messages;
 
+      // 📌 Filtrar notificaciones de estado (delivered, read, etc.)
+      if (value?.statuses) {
+        console.log("📬 Notificación de estado recibida:", value.statuses);
+        return res.status(200).json({ received: true, statusUpdate: true });
+      }
+
+      const messages = value?.messages;
       if (!messages || messages.length === 0) {
-        console.log("⚠️ No hay mensajes en la petición");
+        console.log("⚠️ Webhook sin mensajes de usuario");
         return res.status(200).json({ received: true, noMessage: true });
       }
 
