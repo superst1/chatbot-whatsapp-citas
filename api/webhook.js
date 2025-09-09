@@ -33,7 +33,7 @@ export default async function handler(req, res) {
       const changes = entry?.changes?.[0];
       const value = changes?.value;
 
-      // 📌 Filtrar notificaciones de estado (delivered, read, etc.)
+      // 📌 Filtrar notificaciones de estado
       if (value?.statuses) {
         console.log("📬 Notificación de estado recibida:", value.statuses);
         return res.status(200).json({ received: true, statusUpdate: true });
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
       }
 
       const msg = messages[0];
-      const from = msg?.from; // número del usuario
+      const from = msg?.from;
       const text = msg?.text?.body || "";
       const profileName = value?.contacts?.[0]?.profile?.name || "Paciente";
 
@@ -58,106 +58,105 @@ export default async function handler(req, res) {
 
       let reply = "";
 
-      // Si Gemini ya generó un mensaje humano, lo usamos directamente
-      if (nlu.humanMessage) {
-        console.log("💬 Usando humanMessage de Gemini");
-        reply = nlu.humanMessage;
-      } else {
-        // Si falta información para crear la cita
-        if (nlu.intent === "crear_cita" && nlu.missing?.length > 0) {
-          console.log("⚠️ Faltan datos para crear la cita:", nlu.missing);
+      // Si faltan datos para crear la cita
+      if (nlu.intent === "crear_cita" && nlu.missing?.length > 0) {
+        console.log("⚠️ Faltan datos para crear la cita:", nlu.missing);
 
-          const opcionesFaltantes = [
-            `📋 ${profileName}, para agendar necesito: ${nlu.missing.join(", ")}.`,
-            `🤔 Me falta la siguiente información para tu cita: ${nlu.missing.join(", ")}.`,
-            `📝 Antes de continuar, necesito que me indiques: ${nlu.missing.join(", ")}.`
-          ];
-          reply = opcionesFaltantes[Math.floor(Math.random() * opcionesFaltantes.length)];
+        const opcionesFaltantes = [
+          `📋 ${profileName}, para agendar necesito: ${nlu.missing.join(", ")}.`,
+          `🤔 Me falta la siguiente información para tu cita: ${nlu.missing.join(", ")}.`,
+          `📝 Antes de continuar, necesito que me indiques: ${nlu.missing.join(", ")}.`
+        ];
+        reply = opcionesFaltantes[Math.floor(Math.random() * opcionesFaltantes.length)];
 
-          if (nlu.suggestion) {
-            reply += `\nPuedes enviar algo como:\n💡 "${nlu.suggestion}"`;
-          }
-
-          console.log("📤 Enviando mensaje de solicitud de datos:", reply);
-          await sendWhatsAppText(from, reply);
-          return res.status(200).json({ received: true, missingData: true });
+        if (nlu.suggestion) {
+          reply += `\nPuedes enviar algo como:\n💡 "${nlu.suggestion}"`;
         }
 
-        // 🔹 Procesamiento según intención
-        switch (nlu.intent) {
-          case "crear_cita": {
-            console.log("🆕 Creando cita con datos:", nlu.data);
+        console.log("📤 Enviando mensaje de solicitud de datos:", reply);
+        await sendWhatsAppText(from, reply);
+        return res.status(200).json({ received: true, missingData: true });
+      }
 
-            const numero_cita = await createAppointment({
-              nombre_paciente: nlu.data?.nombre_paciente || profileName,
-              numero_cedula: nlu.data?.numero_cedula || "",
-              nombre_contacto: nlu.data?.nombre_contacto || profileName,
-              celular_contacto: nlu.data?.celular_contacto || from,
-              fecha_cita: nlu.data?.fecha_cita || "",
-              status_cita: "pendiente",
-              observaciones: nlu.data?.observaciones || ""
-            });
+      // 🔹 Procesamiento según intención
+      switch (nlu.intent) {
+        case "crear_cita": {
+          console.log("🆕 Creando cita con datos:", nlu.data);
 
-            console.log("✅ Resultado createAppointment:", numero_cita);
+          const numero_cita = await createAppointment({
+            nombre_paciente: nlu.data?.nombre_paciente || profileName,
+            numero_cedula: nlu.data?.numero_cedula || "",
+            nombre_contacto: nlu.data?.nombre_contacto || profileName,
+            celular_contacto: nlu.data?.celular_contacto || from,
+            fecha_cita: nlu.data?.fecha_cita || "",
+            status_cita: "pendiente",
+            observaciones: nlu.data?.observaciones || ""
+          });
 
+          console.log("✅ Resultado createAppointment:", numero_cita);
+
+          // Usar humanMessage si existe, añadiendo número de cita
+          if (nlu.humanMessage) {
+            reply = `${nlu.humanMessage}\nNúmero de cita: ${numero_cita}`;
+          } else {
             const opciones = [
               `✅ ${profileName}, tu cita quedó registrada con el número ${numero_cita}.`,
               `📅 Listo, agendé tu cita. Este es tu número: ${numero_cita}.`,
               `¡Hecho! Tu cita está confirmada con el número ${numero_cita}.`
             ];
             reply = opciones[Math.floor(Math.random() * opciones.length)];
+          }
+          break;
+        }
+
+        case "consultar_cita": {
+          const id = nlu.data?.numero_cita || "";
+          console.log("🔍 Consultando cita:", id);
+
+          if (!id) {
+            reply = `Por favor envíame el número de cita para consultarla. Ej: consultar 123456`;
             break;
           }
+          const cita = await findAppointmentById(id);
+          console.log("📄 Resultado consulta:", cita);
 
-          case "consultar_cita": {
-            const id = nlu.data?.numero_cita || "";
-            console.log("🔍 Consultando cita:", id);
+          reply = cita
+            ? `📄 Cita ${id}:\n- Paciente: ${cita.nombre_paciente}\n- Fecha: ${cita.fecha_cita}\n- Estado: ${cita.status_cita}\n- Obs: ${cita.observaciones || "N/A"}`
+            : `⚠️ No encontré la cita ${id}.`;
+          break;
+        }
 
-            if (!id) {
-              reply = `Por favor envíame el número de cita para consultarla. Ej: consultar 123456`;
-              break;
-            }
-            const cita = await findAppointmentById(id);
-            console.log("📄 Resultado consulta:", cita);
+        case "actualizar_estado": {
+          const id = nlu.data?.numero_cita || "";
+          const nuevo = nlu.data?.status_cita || "";
+          console.log(`♻️ Actualizando cita ${id} a estado: ${nuevo}`);
 
-            reply = cita
-              ? `📄 Cita ${id}:\n- Paciente: ${cita.nombre_paciente}\n- Fecha: ${cita.fecha_cita}\n- Estado: ${cita.status_cita}\n- Obs: ${cita.observaciones || "N/A"}`
-              : `⚠️ No encontré la cita ${id}.`;
+          if (!id || !nuevo) {
+            reply = `Indica número de cita y nuevo estado. Ej: actualizar 123456 a confirmada`;
             break;
           }
+          const ok = await updateAppointmentStatus(id, nuevo);
+          console.log("✅ Resultado actualización:", ok);
 
-          case "actualizar_estado": {
-            const id = nlu.data?.numero_cita || "";
-            const nuevo = nlu.data?.status_cita || "";
-            console.log(`♻️ Actualizando cita ${id} a estado: ${nuevo}`);
+          reply = ok
+            ? `✅ Estado de la cita ${id} actualizado a: ${nuevo}.`
+            : `⚠️ No pude actualizar la cita ${id}. Verifica el número.`;
+          break;
+        }
 
-            if (!id || !nuevo) {
-              reply = `Indica número de cita y nuevo estado. Ej: actualizar 123456 a confirmada`;
-              break;
-            }
-            const ok = await updateAppointmentStatus(id, nuevo);
-            console.log("✅ Resultado actualización:", ok);
-
-            reply = ok
-              ? `✅ Estado de la cita ${id} actualizado a: ${nuevo}.`
-              : `⚠️ No pude actualizar la cita ${id}. Verifica el número.`;
-            break;
-          }
-
-          default: {
-            console.log("ℹ️ Intent no reconocido, enviando mensaje por defecto");
-            const saludos = [
-              `Hola ${profileName} 👋 Soy MedicAsist, tu asistente de citas.`,
-              `¡Encantado de ayudarte, ${profileName}! Soy MedicAsist.`,
-              `Hola ${profileName} 😊, aquí para ayudarte con tus citas.`
-            ];
-            const instrucciones = `Puedes decir:
+        default: {
+          console.log("ℹ️ Intent no reconocido, enviando mensaje por defecto");
+          const saludos = [
+            `Hola ${profileName} 👋 Soy MedicAsist, tu asistente de citas.`,
+            `¡Encantado de ayudarte, ${profileName}! Soy MedicAsist.`,
+            `Hola ${profileName} 😊, aquí para ayudarte con tus citas.`
+          ];
+          const instrucciones = `Puedes decir:
 - “crear cita para mañana 10am a nombre de Ana”
 - “consultar 123456”
 - “actualizar 123456 a confirmada”`;
 
-            reply = `${saludos[Math.floor(Math.random() * saludos.length)]}\n${instrucciones}`;
-          }
+          reply = `${saludos[Math.floor(Math.random() * saludos.length)]}\n${instrucciones}`;
         }
       }
 
