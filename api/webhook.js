@@ -11,8 +11,9 @@ import { sendWhatsAppText } from "../lib/whatsapp.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Estado de conversación (en memoria del runtime)
+// Estado de conversación y candado de slots en memoria
 const conversationState = {};
+const slotLocks = new Set();
 
 /* ===================== Utilidades ===================== */
 
@@ -32,7 +33,7 @@ function parseManualData(text) {
   const fechaMatch = text.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/);
   if (fechaMatch) data.fecha_cita = normalizeFechaStr(fechaMatch[0]);
 
-  // Hora: HH:mm (24h) o 12h con am/pm
+  // Hora: 24h o 12h am/pm
   const horaMatch24 = text.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/);
   const horaMatchAmPm = text.match(/\b(1[0-2]|0?\d)(?::([0-5]\d))?\s?(am|pm)\b/i);
   if (horaMatch24) {
@@ -45,12 +46,16 @@ function parseManualData(text) {
   }
 
   // Nombre etiquetado
-  const nombreEtiquetado = text.match(/(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i);
+  const nombreEtiquetado = text.match(
+    /(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i
+  );
   if (nombreEtiquetado) data.nombre_paciente = nombreEtiquetado[1].trim();
 
-  // Nombre libre: dos o más palabras con mayúscula inicial
+  // Nombre libre: dos+ palabras con mayúscula inicial
   if (!data.nombre_paciente) {
-    const nombreLibre = text.match(/\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/);
+    const nombreLibre = text.match(
+      /\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/
+    );
     if (nombreLibre) data.nombre_paciente = nombreLibre[1].trim();
   }
 
@@ -156,7 +161,7 @@ export default async function handler(req, res) {
 
       let reply = "";
 
-      // Si hay flujo pendiente de crear_cita, intentar completar con este turno
+      // Si hay flujo pendiente (crear_cita), intentar completarlo
       if (conversationState[from] && nlu.intent !== "crear_cita") {
         const prev = conversationState[from];
         const manualData = parseManualData(text);
@@ -175,16 +180,24 @@ export default async function handler(req, res) {
         const missing = requiredMissing(completedData, requiredFields);
 
         if (missing.length === 0) {
-          // Verificar disponibilidad
-          const disponible = await isHoraDisponible(completedData.fecha_cita, completedData.hora_cita);
-          if (!disponible) {
+          const slotKey = `${completedData.fecha_cita}|${completedData.hora_cita}`;
+          if (slotLocks.has(slotKey)) {
             const libres = await getHorasDisponibles(completedData.fecha_cita);
-            reply = `⚠️ La hora ${completedData.hora_cita} ya está ocupada el ${completedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
+            reply = `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}\nDime cuál eliges.`;
             conversationState[from] = { intent: "crear_cita", data: completedData };
           } else {
-            const numero_cita = await createAppointment(completedData);
-            reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${completedData.numero_cedula}) para el ${completedData.fecha_cita} a las ${completedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
-            delete conversationState[from];
+            slotLocks.add(slotKey);
+            const disponible = await isHoraDisponible(completedData.fecha_cita, completedData.hora_cita);
+            if (!disponible) {
+              const libres = await getHorasDisponibles(completedData.fecha_cita);
+              reply = `⚠️ La hora ${completedData.hora_cita} ya está ocupada el ${completedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
+              conversationState[from] = { intent: "crear_cita", data: completedData };
+            } else {
+              const numero_cita = await createAppointment(completedData);
+              reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${completedData.numero_cedula}) para el ${completedData.fecha_cita} a las ${completedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
+              delete conversationState[from];
+            }
+            slotLocks.delete(slotKey);
           }
         } else {
           conversationState[from] = { intent: "crear_cita", data: completedData };
@@ -209,14 +222,23 @@ export default async function handler(req, res) {
             conversationState[from] = { intent: "crear_cita", data: mergedData };
             reply = `📋 ${profileName}, para agendar necesito: ${missing.join(", ")}.`;
           } else {
-            const disponible = await isHoraDisponible(mergedData.fecha_cita, mergedData.hora_cita);
-            if (!disponible) {
+            const slotKey = `${mergedData.fecha_cita}|${mergedData.hora_cita}`;
+            if (slotLocks.has(slotKey)) {
               const libres = await getHorasDisponibles(mergedData.fecha_cita);
-              reply = `⚠️ La hora ${mergedData.hora_cita} ya está ocupada el ${mergedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
+              reply = `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}\nDime cuál eliges.`;
               conversationState[from] = { intent: "crear_cita", data: mergedData };
             } else {
-              const numero_cita = await createAppointment(mergedData);
-              reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${mergedData.numero_cedula}) para el ${mergedData.fecha_cita} a las ${mergedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
+              slotLocks.add(slotKey);
+              const disponible = await isHoraDisponible(mergedData.fecha_cita, mergedData.hora_cita);
+              if (!disponible) {
+                const libres = await getHorasDisponibles(mergedData.fecha_cita);
+                reply = `⚠️ La hora ${mergedData.hora_cita} ya está ocupada el ${mergedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
+                conversationState[from] = { intent: "crear_cita", data: mergedData };
+              } else {
+                const numero_cita = await createAppointment(mergedData);
+                reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${mergedData.numero_cedula}) para el ${mergedData.fecha_cita} a las ${mergedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
+              }
+              slotLocks.delete(slotKey);
             }
           }
           break;
@@ -268,7 +290,7 @@ ${instrucciones}`;
     }
   }
 
-  // Otros métodos no permitidos
+  // Otros métodos
   return res.status(405).json({ error: "Method not allowed" });
 }
 
