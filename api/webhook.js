@@ -12,21 +12,39 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 // Estado en memoria (se reinicia al reiniciar el servidor)
 const conversationState = {};
 
-// Parseo manual básico
+/* ===================== Utilidades ===================== */
+
+// Parseo manual mejorado para extraer datos desde texto libre
 function parseManualData(text) {
   const data = {};
+
+  // Cédula: 10 dígitos
   const cedulaMatch = text.match(/\b\d{10}\b/);
   if (cedulaMatch) data.numero_cedula = cedulaMatch[0];
+
+  // Celular: 09 + 8 dígitos (Ecuador)
   const celularMatch = text.match(/\b09\d{8}\b/);
   if (celularMatch) data.celular_contacto = celularMatch[0];
-  const fechaMatch = text.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/); // admite 2 o 4 dígitos de año
+
+  // Fecha: dd/mm/yyyy o dd-mm-yyyy con hora opcional (HH:mm y opcional am/pm)
+  const fechaRegex = /\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}(?:\s+\d{1,2}:\d{2}(?:\s*(?:am|pm))?)?\b/i;
+  const fechaMatch = text.match(fechaRegex);
   if (fechaMatch) data.fecha_cita = fechaMatch[0];
-  const nombreMatch = text.match(/(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i);
-  if (nombreMatch) data.nombre_paciente = nombreMatch[1].trim();
+
+  // Nombre precedido por "paciente" o "nombre"
+  const nombreEtiquetado = text.match(/(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i);
+  if (nombreEtiquetado) data.nombre_paciente = nombreEtiquetado[1].trim();
+
+  // Nombre libre: dos o más palabras con mayúscula inicial (si no se detectó antes)
+  if (!data.nombre_paciente) {
+    const nombreLibre = text.match(/\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/);
+    if (nombreLibre) data.nombre_paciente = nombreLibre[1].trim();
+  }
+
   return data;
 }
 
-// Defaults inteligentes antes de validar faltantes
+// Completar campos por defecto
 function applyDefaults(from, profileName, data) {
   const d = { ...data };
   if (!d.nombre_contacto && d.nombre_paciente) d.nombre_contacto = d.nombre_paciente;
@@ -34,16 +52,20 @@ function applyDefaults(from, profileName, data) {
   return d;
 }
 
+// Validar faltantes
 function requiredMissing(data, fields) {
   return fields.filter((f) => !data[f] || String(data[f]).trim() === "");
 }
 
+// Aleatorio
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+/* ===================== Handler ===================== */
+
 export default async function handler(req, res) {
-  // Verificación (GET)
+  // Verificación del webhook (GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -61,7 +83,7 @@ export default async function handler(req, res) {
       const changes = entry?.changes?.[0];
       const value = changes?.value;
 
-      // Notificaciones de estado
+      // Notificaciones de estado de WhatsApp (no son mensajes del usuario)
       if (value?.statuses) {
         return res.status(200).json({ received: true, statusUpdate: true });
       }
@@ -76,15 +98,15 @@ export default async function handler(req, res) {
       const text = msg?.text?.body || "";
       const profileName = value?.contacts?.[0]?.profile?.name || "Paciente";
 
-      // NLU
+      // NLU con Gemini
       const nlu = await handleMessage(text);
 
-      // Variaciones
+      // Variaciones de saludo y cierre
       const saludos = [
-        `Hola, Clinica Super te saluda ${profileName} 👋`,
-        `¡Qué gusto verte, Clinica Super te saluda ${profileName}!`,
-        `Buenas, Clinica Super te saluda ${profileName} 😄`,
-        `¡Hola de nuevo, Clinica Super te saluda ${profileName}!`
+        `Hola ${profileName} 👋`,
+        `¡Qué gusto verte, ${profileName}!`,
+        `Buenas, ${profileName} 😄`,
+        `¡Hola de nuevo, ${profileName}!`
       ];
       const cierres = [
         "¡Te espero! 😊",
@@ -99,37 +121,40 @@ export default async function handler(req, res) {
 
       let reply = "";
 
-      // Si hay flujo pendiente, intentamos completar con lo nuevo
+      // Si hay flujo pendiente de crear_cita, intentamos completarlo con el mensaje actual
       if (conversationState[from] && nlu.intent !== "crear_cita") {
         const prev = conversationState[from];
         const manualData = parseManualData(text);
-        const combinedBase = {
-          ...prev.data,
-          ...Object.fromEntries(Object.entries(nlu.data || {}).filter(([_, v]) => v)),
-          ...manualData
-        };
-        // Defaults antes de validar
-        const combinedData = applyDefaults(from, profileName, combinedBase);
 
-        // Mínimos para cerrar: nombre_paciente, numero_cedula, fecha_cita
+        // Merge inteligente: solo rellenar vacíos (no pisar lo ya capturado)
+        const combinedData = { ...prev.data };
+        for (const [k, v] of Object.entries({ ...(nlu.data || {}), ...manualData })) {
+          if (v && (!combinedData[k] || combinedData[k].trim() === "")) {
+            combinedData[k] = v;
+          }
+        }
+
+        const completedData = applyDefaults(from, profileName, combinedData);
+
+        // Mínimos para cerrar
         const requiredFields = ["nombre_paciente", "numero_cedula", "fecha_cita"];
-        const missing = requiredMissing(combinedData, requiredFields);
+        const missing = requiredMissing(completedData, requiredFields);
 
         if (missing.length === 0) {
           const numero_cita = await createAppointment({
-            nombre_paciente: combinedData.nombre_paciente || profileName,
-            numero_cedula: combinedData.numero_cedula || "",
-            nombre_contacto: combinedData.nombre_contacto || profileName,
-            celular_contacto: combinedData.celular_contacto || from,
-            fecha_cita: combinedData.fecha_cita || "",
+            nombre_paciente: completedData.nombre_paciente,
+            numero_cedula: completedData.numero_cedula,
+            nombre_contacto: completedData.nombre_contacto,
+            celular_contacto: completedData.celular_contacto,
+            fecha_cita: completedData.fecha_cita,
             status_cita: "pendiente",
-            observaciones: combinedData.observaciones || ""
+            observaciones: completedData.observaciones || ""
           });
 
-          reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${combinedData.numero_cedula}), número interno ${numero_cita}. ${pickRandom(cierres)}`;
+          reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${completedData.numero_cedula}), número interno ${numero_cita}. ${pickRandom(cierres)}`;
           delete conversationState[from];
         } else {
-          conversationState[from] = { intent: "crear_cita", data: combinedData };
+          conversationState[from] = { intent: "crear_cita", data: completedData };
           reply = `Aún me falta: ${missing.join(", ")}.`;
         }
 
@@ -137,7 +162,7 @@ export default async function handler(req, res) {
         return res.status(200).json({ received: true });
       }
 
-      // Switch principal
+      // Switch principal por intención
       switch (nlu.intent) {
         case "crear_cita": {
           const manualData = parseManualData(text);
@@ -152,11 +177,11 @@ export default async function handler(req, res) {
             reply = `📋 ${profileName}, para agendar necesito: ${missing.join(", ")}.`;
           } else {
             const numero_cita = await createAppointment({
-              nombre_paciente: mergedData.nombre_paciente || profileName,
-              numero_cedula: mergedData.numero_cedula || "",
-              nombre_contacto: mergedData.nombre_contacto || profileName,
-              celular_contacto: mergedData.celular_contacto || from,
-              fecha_cita: mergedData.fecha_cita || "",
+              nombre_paciente: mergedData.nombre_paciente,
+              numero_cedula: mergedData.numero_cedula,
+              nombre_contacto: mergedData.nombre_contacto,
+              celular_contacto: mergedData.celular_contacto,
+              fecha_cita: mergedData.fecha_cita,
               status_cita: "pendiente",
               observaciones: mergedData.observaciones || ""
             });
@@ -212,7 +237,7 @@ ${instrucciones}`;
     }
   }
 
-  // Otros métodos
+  // Otros métodos no permitidos
   return res.status(405).json({ error: "Method not allowed" });
 }
 
