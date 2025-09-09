@@ -81,10 +81,10 @@ export default async function handler(req, res) {
 
       // Variaciones
       const saludos = [
-        `Hola ${profileName} 👋`,
-        `¡Qué gusto verte, ${profileName}!`,
-        `Buenas, ${profileName} 😄`,
-        `¡Hola de nuevo, ${profileName}!`
+        `Hola, Clinica Super te saluda ${profileName} 👋`,
+        `¡Qué gusto verte, Clinica Super te saluda ${profileName}!`,
+        `Buenas, Clinica Super te saluda ${profileName} 😄`,
+        `¡Hola de nuevo, Clinica Super te saluda ${profileName}!`
       ];
       const cierres = [
         "¡Te espero! 😊",
