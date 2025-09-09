@@ -58,6 +58,20 @@ export default async function handler(req, res) {
 
       let reply = "";
 
+      // 🎨 Variaciones de saludo y cierre
+      const saludos = [
+        `Hola ${profileName} 👋`,
+        `¡Qué gusto verte, ${profileName}!`,
+        `Buenas, ${profileName} 😄`,
+        `¡Hola de nuevo, ${profileName}!`
+      ];
+      const cierres = [
+        "¡Te espero! 😊",
+        "Nos vemos pronto.",
+        "Gracias por confiar en nosotros.",
+        "¡Hasta pronto!"
+      ];
+
       // Si faltan datos para crear la cita
       if (nlu.intent === "crear_cita" && nlu.missing?.length > 0) {
         console.log("⚠️ Faltan datos para crear la cita:", nlu.missing);
@@ -95,9 +109,10 @@ export default async function handler(req, res) {
 
           console.log("✅ Resultado createAppointment:", numero_cita);
 
-          // Usar humanMessage si existe, añadiendo número de cita
           if (nlu.humanMessage) {
-            reply = `${nlu.humanMessage}\nNúmero de cita: ${numero_cita}`;
+            const saludo = saludos[Math.floor(Math.random() * saludos.length)];
+            const cierre = cierres[Math.floor(Math.random() * cierres.length)];
+            reply = `${saludo} ${nlu.humanMessage}\nNúmero de cita: ${numero_cita}. ${cierre}`;
           } else {
             const opciones = [
               `✅ ${profileName}, tu cita quedó registrada con el número ${numero_cita}.`,
@@ -146,17 +161,18 @@ export default async function handler(req, res) {
 
         default: {
           console.log("ℹ️ Intent no reconocido, enviando mensaje por defecto");
-          const saludos = [
-            `Hola ${profileName} 👋 Soy MedicAsist, tu asistente de citas.`,
-            `¡Encantado de ayudarte, ${profileName}! Soy MedicAsist.`,
-            `Hola ${profileName} 😊, aquí para ayudarte con tus citas.`
+          const ayudas = [
+            `Puedo ayudarte a crear, consultar o actualizar tus citas.`,
+            `Gestiono tus citas médicas de forma rápida y sencilla.`,
+            `Estoy aquí para agendar, consultar o modificar tus citas.`
           ];
           const instrucciones = `Puedes decir:
 - “crear cita para mañana 10am a nombre de Ana”
 - “consultar 123456”
 - “actualizar 123456 a confirmada”`;
 
-          reply = `${saludos[Math.floor(Math.random() * saludos.length)]}\n${instrucciones}`;
+          const saludo = saludos[Math.floor(Math.random() * saludos.length)];
+          reply = `${saludo} ${ayudas[Math.floor(Math.random() * ayudas.length)]}\n${instrucciones}`;
         }
       }
 
