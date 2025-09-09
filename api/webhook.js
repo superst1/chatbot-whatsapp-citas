@@ -11,7 +11,7 @@ import { sendWhatsAppText } from "../lib/whatsapp.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Estado de conversación y candado de slots en memoria
+// Estados en memoria
 const conversationState = {};
 const slotLocks = new Set();
 
@@ -20,19 +20,19 @@ const slotLocks = new Set();
 function parseManualData(text) {
   const data = {};
 
-  // Cédula
+  // Cédula: 10 dígitos
   const cedulaMatch = text.match(/\b\d{10}\b/);
   if (cedulaMatch) data.numero_cedula = cedulaMatch[0];
 
-  // Celular
+  // Celular: 09 + 8 dígitos
   const celularMatch = text.match(/\b09\d{8}\b/);
   if (celularMatch) data.celular_contacto = celularMatch[0];
 
-  // Fecha
+  // Fecha: dd/mm/yyyy o dd-mm-yyyy (normalizada a DD/MM/YYYY)
   const fechaMatch = text.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/);
   if (fechaMatch) data.fecha_cita = normalizeFechaStr(fechaMatch[0]);
 
-  // Hora
+  // Hora: HH:mm (24h) o 12h con am/pm -> normalizada a HH:mm
   const horaMatch24 = text.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/);
   const horaMatchAmPm = text.match(/\b(1[0-2]|0?\d)(?::([0-5]\d))?\s?(am|pm)\b/i);
   if (horaMatch24) {
@@ -50,11 +50,9 @@ function parseManualData(text) {
   );
   if (nombreEtiquetado) data.nombre_paciente = nombreEtiquetado[1].trim();
 
-  // Nombre libre
+  // Nombre libre: dos+ palabras con mayúscula inicial
   if (!data.nombre_paciente) {
-    const nombreLibre = text.match(
-      /\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/
-    );
+    const nombreLibre = text.match(/\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/);
     if (nombreLibre) data.nombre_paciente = nombreLibre[1].trim();
   }
 
@@ -101,7 +99,7 @@ function pickRandom(arr) {
 /* ===================== Handler ===================== */
 
 export default async function handler(req, res) {
-  // Verificación webhook
+  // Verificación (GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -112,13 +110,14 @@ export default async function handler(req, res) {
     return res.status(403).send("Verification failed");
   }
 
-  // Recepción mensajes
+  // Recepción (POST)
   if (req.method === "POST") {
     try {
       const entry = req.body?.entry?.[0];
       const changes = entry?.changes?.[0];
       const value = changes?.value;
 
+      // Estados de WhatsApp (no son mensajes del usuario)
       if (value?.statuses) {
         return res.status(200).json({ received: true, statusUpdate: true });
       }
@@ -133,8 +132,10 @@ export default async function handler(req, res) {
       const text = msg?.text?.body || "";
       const profileName = value?.contacts?.[0]?.profile?.name || "Paciente";
 
+      // NLU
       const nlu = await handleMessage(text);
 
+      // Respuestas base
       const saludos = [
         `Hola ${profileName} 👋`,
         `¡Qué gusto verte, ${profileName}!`,
@@ -154,19 +155,22 @@ export default async function handler(req, res) {
 
       let reply = "";
 
-      // === Flujo pendiente unificado ===
+      // === Flujo pendiente unificado (siempre intentamos completar primero) ===
       if (conversationState[from]) {
         const prev = conversationState[from];
         const manualData = parseManualData(text);
 
+        // Merge inteligente: solo rellenar vacíos
         const combinedData = { ...prev.data };
         for (const [k, v] of Object.entries({ ...(nlu.data || {}), ...manualData })) {
           if (v && (!combinedData[k] || combinedData[k].trim() === "")) {
             combinedData[k] = v;
           }
         }
+
         const completedData = applyDefaults(from, profileName, combinedData);
 
+        // Requisitos mínimos (incluye hora)
         const requiredFields = ["nombre_paciente", "numero_cedula", "fecha_cita", "hora_cita"];
         const missing = requiredMissing(completedData, requiredFields);
 
@@ -174,13 +178,14 @@ export default async function handler(req, res) {
           const slotKey = `${completedData.fecha_cita}|${completedData.hora_cita}`;
           if (slotLocks.has(slotKey)) {
             const libres = await getHorasDisponibles(completedData.fecha_cita);
-            reply = `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}`;
+            reply = `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}\nDime cuál eliges.`;
+            conversationState[from] = { intent: "crear_cita", data: completedData };
           } else {
             slotLocks.add(slotKey);
             const disponible = await isHoraDisponible(completedData.fecha_cita, completedData.hora_cita);
             if (!disponible) {
               const libres = await getHorasDisponibles(completedData.fecha_cita);
-              reply = `⚠️ La hora ${completedData.hora_cita} ya está ocupada el ${completedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}`;
+              reply = `⚠️ La hora ${completedData.hora_cita} ya está ocupada el ${completedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
               conversationState[from] = { intent: "crear_cita", data: completedData };
             } else {
               const numero_cita = await createAppointment(completedData);
@@ -191,7 +196,99 @@ export default async function handler(req, res) {
           }
         } else {
           conversationState[from] = { intent: "crear_cita", data: completedData };
-          reply = `📋 Me falta: ${missing.join(", ")}.`;
+          reply = `📋 Me falta: ${missing.join(", ")}).`;
         }
 
-       
+        await sendWhatsAppText(from, reply);
+        return res.status(200).json({ received: true });
+      }
+
+      // === Switch principal (si no hay flujo pendiente) ===
+      switch (nlu.intent) {
+        case "crear_cita": {
+          const manualData = parseManualData(text);
+          const base = { ...(nlu.data || {}), ...manualData };
+          const mergedData = applyDefaults(from, profileName, base);
+
+          const requiredFields = ["nombre_paciente", "numero_cedula", "fecha_cita", "hora_cita"];
+          const missing = requiredMissing(mergedData, requiredFields);
+
+          if (missing.length > 0) {
+            conversationState[from] = { intent: "crear_cita", data: mergedData };
+            reply = `📋 ${profileName}, para agendar necesito: ${missing.join(", ")}.`;
+          } else {
+            const slotKey = `${mergedData.fecha_cita}|${mergedData.hora_cita}`;
+            if (slotLocks.has(slotKey)) {
+              const libres = await getHorasDisponibles(mergedData.fecha_cita);
+              reply = `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}\nDime cuál eliges.`;
+              conversationState[from] = { intent: "crear_cita", data: mergedData };
+            } else {
+              slotLocks.add(slotKey);
+              const disponible = await isHoraDisponible(mergedData.fecha_cita, mergedData.hora_cita);
+              if (!disponible) {
+                const libres = await getHorasDisponibles(mergedData.fecha_cita);
+                reply = `⚠️ La hora ${mergedData.hora_cita} ya está ocupada el ${mergedData.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`;
+                conversationState[from] = { intent: "crear_cita", data: mergedData };
+              } else {
+                const numero_cita = await createAppointment(mergedData);
+                reply = `${pickRandom(saludos)} Tu cita quedó registrada (cédula ${mergedData.numero_cedula}) para el ${mergedData.fecha_cita} a las ${mergedData.hora_cita}. Número interno ${numero_cita}. ${pickRandom(cierres)}`;
+              }
+              slotLocks.delete(slotKey);
+            }
+          }
+          break;
+        }
+
+        case "consultar_cita": {
+          const cedula = nlu.data?.numero_cedula || parseManualData(text).numero_cedula || "";
+          if (!cedula) {
+            reply = `Por favor envíame la cédula para consultar la cita. Ej: consultar cédula 1802525254`;
+            break;
+          }
+          const cita = await findAppointmentByCedula(cedula);
+          reply = cita
+            ? `📄 Cita de ${cita.nombre_paciente || ""}\n- Fecha: ${cita.fecha_cita || ""}\n- Hora: ${cita.hora_cita || ""}\n- Estado: ${cita.status_cita || ""}\n- Obs: ${cita.observaciones || "N/A"}`
+            : `⚠️ No encontré ninguna cita con la cédula ${cedula}.`;
+          break;
+        }
+
+        case "actualizar_estado": {
+          const cedula = nlu.data?.numero_cedula || parseManualData(text).numero_cedula || "";
+          const nuevo = nlu.data?.status_cita || "";
+          if (!cedula || !nuevo) {
+            reply = `Indica cédula y nuevo estado. Ej: actualizar 1802525254 a confirmada`;
+            break;
+          }
+          const ok = await updateAppointmentStatusByCedula(cedula, nuevo);
+          reply = ok
+            ? `✅ Estado de la cita con cédula ${cedula} actualizado a: ${nuevo}.`
+            : `⚠️ No pude actualizar la cita con cédula ${cedula}. Verifica si existe.`;
+          break;
+        }
+
+        default: {
+          const ayudas = [
+            `Puedo ayudarte a crear, consultar o actualizar tus citas.`,
+            `Gestiono tus citas médicas de forma rápida y sencilla.`,
+            `Estoy aquí para agendar, consultar o modificar tus citas.`
+          ];
+          reply = `${pickRandom(saludos)} ${pickRandom(ayudas)}
+${instrucciones}`;
+        }
+      }
+
+      await sendWhatsAppText(from, reply);
+      return res.status(200).json({ received: true });
+    } catch (err) {
+      console.error("💥 Webhook error:", err);
+      return res.status(500).json({ error: "Internal error" });
+    }
+  }
+
+  // Otros métodos
+  return res.status(405).json({ error: "Method not allowed" });
+}
+
+export const config = {
+  api: { bodyParser: { sizeLimit: "1mb" } }
+};
