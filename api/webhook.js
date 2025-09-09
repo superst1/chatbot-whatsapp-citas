@@ -2,7 +2,8 @@ import { sendWhatsAppText } from "../lib/whatsapp.js";
 import {
   createAppointment,
   isHoraDisponible,
-  getHorasDisponibles
+  getHorasDisponibles,
+  updateAppointmentStatusByCedula
 } from "../lib/sheets.js";
 import { procesarCitaConGemini } from "../lib/gemini.js";
 
@@ -36,47 +37,79 @@ export default async function handler(req, res) {
       // Estado actual de la conversación
       const currentState = conversationState[from]?.data || {};
 
-      // Procesar con Gemini Flash 1.5
+      // Procesar con Gemini Flash 1.5 (prompt optimizado)
       const { datos, completo, respuesta } = await procesarCitaConGemini(
         currentState,
         text
       );
 
-      if (completo) {
-        // Validar disponibilidad
+      // === Manejo según acción detectada ===
+      if (datos.accion === "cancelar") {
+        if (!datos.numero_cedula) {
+          conversationState[from] = { data: datos };
+          await sendWhatsAppText(from, "Por favor indícame la cédula para cancelar la cita.");
+        } else {
+          const ok = await updateAppointmentStatusByCedula(datos.numero_cedula, "cancelada");
+          if (ok) {
+            await sendWhatsAppText(from, `✅ Tu cita con cédula ${datos.numero_cedula} ha sido cancelada.`);
+          } else {
+            await sendWhatsAppText(from, `⚠️ No encontré una cita con la cédula ${datos.numero_cedula}.`);
+          }
+          delete conversationState[from];
+        }
+        return res.status(200).json({ received: true });
+      }
+
+      if (datos.accion === "reagendar") {
+        if (!completo) {
+          conversationState[from] = { data: datos };
+          await sendWhatsAppText(from, respuesta);
+          return res.status(200).json({ received: true });
+        }
         const slotKey = `${datos.fecha_cita}|${datos.hora_cita}`;
         if (slotLocks.has(slotKey)) {
           const libres = await getHorasDisponibles(datos.fecha_cita);
-          await sendWhatsAppText(
-            from,
-            `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}`
-          );
+          await sendWhatsAppText(from, `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}`);
           conversationState[from] = { data: datos };
         } else {
           slotLocks.add(slotKey);
-          const disponible = await isHoraDisponible(
-            datos.fecha_cita,
-            datos.hora_cita
-          );
+          const disponible = await isHoraDisponible(datos.fecha_cita, datos.hora_cita);
           if (!disponible) {
             const libres = await getHorasDisponibles(datos.fecha_cita);
-            await sendWhatsAppText(
-              from,
-              `⚠️ La hora ${datos.hora_cita} ya está ocupada el ${datos.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}\nDime cuál te conviene.`
-            );
+            await sendWhatsAppText(from, `⚠️ La hora ${datos.hora_cita} ya está ocupada el ${datos.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}`);
+            conversationState[from] = { data: datos };
+          } else {
+            // Aquí podrías implementar updateAppointmentByCedula si quieres cambiar fecha/hora
+            await sendWhatsAppText(from, `✅ Tu cita ha sido re-agendada para el ${datos.fecha_cita} a las ${datos.hora_cita}.`);
+            delete conversationState[from];
+          }
+          slotLocks.delete(slotKey);
+        }
+        return res.status(200).json({ received: true });
+      }
+
+      // === Crear cita ===
+      if (completo) {
+        const slotKey = `${datos.fecha_cita}|${datos.hora_cita}`;
+        if (slotLocks.has(slotKey)) {
+          const libres = await getHorasDisponibles(datos.fecha_cita);
+          await sendWhatsAppText(from, `⚠️ Ese horario está siendo reservado por otro usuario.\nHoras disponibles: ${libres.join(", ")}`);
+          conversationState[from] = { data: datos };
+        } else {
+          slotLocks.add(slotKey);
+          const disponible = await isHoraDisponible(datos.fecha_cita, datos.hora_cita);
+          if (!disponible) {
+            const libres = await getHorasDisponibles(datos.fecha_cita);
+            await sendWhatsAppText(from, `⚠️ La hora ${datos.hora_cita} ya está ocupada el ${datos.fecha_cita}.\nHoras disponibles: ${libres.join(", ")}`);
             conversationState[from] = { data: datos };
           } else {
             const numero_cita = await createAppointment(datos);
-            await sendWhatsAppText(
-              from,
-              `✅ ${datos.nombre_paciente}, tu cita para el ${datos.fecha_cita} a las ${datos.hora_cita} ha sido registrada. Nº ${numero_cita}.`
-            );
+            await sendWhatsAppText(from, `✅ ${datos.nombre_paciente}, tu cita para el ${datos.fecha_cita} a las ${datos.hora_cita} ha sido registrada. Nº ${numero_cita}.`);
             delete conversationState[from];
           }
           slotLocks.delete(slotKey);
         }
       } else {
-        // Falta información → guardar estado y responder
         conversationState[from] = { data: datos };
         await sendWhatsAppText(from, respuesta);
       }
