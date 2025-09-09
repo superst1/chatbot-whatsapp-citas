@@ -19,22 +19,23 @@ const slotLocks = new Set();
 
 function parseManualData(text) {
   const data = {};
+  const t = (text || "").trim();
 
   // Cédula: 10 dígitos
-  const cedulaMatch = text.match(/\b\d{10}\b/);
+  const cedulaMatch = t.match(/\b\d{10}\b/);
   if (cedulaMatch) data.numero_cedula = cedulaMatch[0];
 
   // Celular: 09 + 8 dígitos
-  const celularMatch = text.match(/\b09\d{8}\b/);
+  const celularMatch = t.match(/\b09\d{8}\b/);
   if (celularMatch) data.celular_contacto = celularMatch[0];
 
-  // Fecha: dd/mm/yyyy o dd-mm-yyyy (normalizada a DD/MM/YYYY)
-  const fechaMatch = text.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/);
+  // Fecha: dd/mm/yyyy o dd-mm-yyyy
+  const fechaMatch = t.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/);
   if (fechaMatch) data.fecha_cita = normalizeFechaStr(fechaMatch[0]);
 
   // Hora: HH:mm (24h) o 12h con am/pm -> normalizada a HH:mm
-  const horaMatch24 = text.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/);
-  const horaMatchAmPm = text.match(/\b(1[0-2]|0?\d)(?::([0-5]\d))?\s?(am|pm)\b/i);
+  const horaMatch24 = t.match(/\b([01]?\d|2[0-3]):[0-5]\d\b/);
+  const horaMatchAmPm = t.match(/\b(1[0-2]|0?\d)(?::([0-5]\d))?\s?(am|pm)\b/i);
   if (horaMatch24) {
     data.hora_cita = normalizeHora(horaMatch24[0]);
   } else if (horaMatchAmPm) {
@@ -45,14 +46,14 @@ function parseManualData(text) {
   }
 
   // Nombre etiquetado
-  const nombreEtiquetado = text.match(
+  const nombreEtiquetado = t.match(
     /(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i
   );
   if (nombreEtiquetado) data.nombre_paciente = nombreEtiquetado[1].trim();
 
   // Nombre libre: dos+ palabras con mayúscula inicial
   if (!data.nombre_paciente) {
-    const nombreLibre = text.match(/\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/);
+    const nombreLibre = t.match(/\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)\b/);
     if (nombreLibre) data.nombre_paciente = nombreLibre[1].trim();
   }
 
@@ -60,7 +61,7 @@ function parseManualData(text) {
 }
 
 function normalizeHora(hhmm) {
-  const [h, m] = hhmm.split(":");
+  const [h, m] = String(hhmm).split(":");
   return `${String(parseInt(h, 10)).padStart(2, "0")}:${m}`;
 }
 
@@ -117,7 +118,7 @@ export default async function handler(req, res) {
       const changes = entry?.changes?.[0];
       const value = changes?.value;
 
-      // Estados de WhatsApp (no son mensajes del usuario)
+      // Estados de WhatsApp
       if (value?.statuses) {
         return res.status(200).json({ received: true, statusUpdate: true });
       }
@@ -135,7 +136,7 @@ export default async function handler(req, res) {
       // NLU
       const nlu = await handleMessage(text);
 
-      // Respuestas base
+      // Estilo
       const saludos = [
         `Hola ${profileName} 👋`,
         `¡Qué gusto verte, ${profileName}!`,
@@ -155,22 +156,28 @@ export default async function handler(req, res) {
 
       let reply = "";
 
-      // === Flujo pendiente unificado (siempre intentamos completar primero) ===
+      // === Flujo pendiente unificado (siempre antes del switch) ===
       if (conversationState[from]) {
         const prev = conversationState[from];
+
+        // Parseo manual
         const manualData = parseManualData(text);
 
-        // Merge inteligente: solo rellenar vacíos
+        // Si el usuario envía solo una hora, tomarla directo (permite "14:00" o "14:00 por favor")
+        const soloHora = text.trim().match(/^([01]?\d|2[0-3]):[0-5]\d(?:\s*(?:am|pm))?(?:\s+por\s+favor)?$/i);
+        if (soloHora) {
+          manualData.hora_cita = normalizeHora(soloHora[0]);
+        }
+
+        // Merge inteligente: no pisar campos existentes
         const combinedData = { ...prev.data };
         for (const [k, v] of Object.entries({ ...(nlu.data || {}), ...manualData })) {
-          if (v && (!combinedData[k] || combinedData[k].trim() === "")) {
+          if (v && (!combinedData[k] || String(combinedData[k]).trim() === "")) {
             combinedData[k] = v;
           }
         }
 
         const completedData = applyDefaults(from, profileName, combinedData);
-
-        // Requisitos mínimos (incluye hora)
         const requiredFields = ["nombre_paciente", "numero_cedula", "fecha_cita", "hora_cita"];
         const missing = requiredMissing(completedData, requiredFields);
 
@@ -194,16 +201,18 @@ export default async function handler(req, res) {
             }
             slotLocks.delete(slotKey);
           }
+
+          await sendWhatsAppText(from, reply);
+          return res.status(200).json({ received: true });
         } else {
           conversationState[from] = { intent: "crear_cita", data: completedData };
           reply = `📋 Me falta: ${missing.join(", ")}.`;
+          await sendWhatsAppText(from, reply);
+          return res.status(200).json({ received: true });
         }
-
-        await sendWhatsAppText(from, reply);
-        return res.status(200).json({ received: true });
       }
 
-      // === Switch principal (si no hay flujo pendiente) ===
+      // === Switch principal (cuando no hay flujo pendiente) ===
       switch (nlu.intent) {
         case "crear_cita": {
           const manualData = parseManualData(text);
