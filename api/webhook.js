@@ -1,36 +1,73 @@
 // api/webhook.js
 import { handleMessage } from "../lib/gemini.js";
-import { createAppointment, findAppointmentById, updateAppointmentStatus } from "../lib/sheets.js";
+import {
+  createAppointment,
+  findAppointmentByCedula,
+  updateAppointmentStatusByCedula
+} from "../lib/sheets.js";
 import { sendWhatsAppText } from "../lib/whatsapp.js";
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// Estado en memoria (se reinicia si se reinicia el servidor)
+// Estado en memoria (se reinicia al reiniciar el servidor)
 const conversationState = {};
 
+// ------------ Utilidades ------------
+
+function parseManualData(text) {
+  const data = {};
+
+  // Cédula: 10 dígitos
+  const cedulaMatch = text.match(/\b\d{10}\b/);
+  if (cedulaMatch) data.numero_cedula = cedulaMatch[0];
+
+  // Celular: 09 + 8 dígitos (Ecuador)
+  const celularMatch = text.match(/\b09\d{8}\b/);
+  if (celularMatch) data.celular_contacto = celularMatch[0];
+
+  // Fecha dd/mm/yyyy o dd-mm-yyyy
+  const fechaMatch = text.match(/\b\d{1,2}[\/-]\d{1,2}[\/-]\d{4}\b/);
+  if (fechaMatch) data.fecha_cita = fechaMatch[0];
+
+  // Nombre si viene con "nombre" o "paciente"
+  const nombreMatch = text.match(
+    /(?:nombre|paciente)\s+(?:es\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){0,3})/i
+  );
+  if (nombreMatch) data.nombre_paciente = nombreMatch[1].trim();
+
+  return data;
+}
+
+function requiredMissing(data, fields) {
+  return fields.filter((f) => !data[f] || String(data[f]).trim() === "");
+}
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// ------------ Handler ------------
+
 export default async function handler(req, res) {
-  // 🔹 Verificación de Webhook (GET)
+  // Verificación (GET)
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
-
     if (mode === "subscribe" && token === VERIFY_TOKEN) {
       return res.status(200).send(challenge);
-    } else {
-      return res.status(403).send("Verification failed");
     }
+    return res.status(403).send("Verification failed");
   }
 
-  // 🔹 Recepción de mensajes (POST)
+  // Recepción de mensajes (POST)
   if (req.method === "POST") {
     try {
-      const body = req.body;
-      const entry = body?.entry?.[0];
+      const entry = req.body?.entry?.[0];
       const changes = entry?.changes?.[0];
       const value = changes?.value;
 
-      // 📌 Filtrar notificaciones de estado
+      // Filtrar notificaciones de estado
       if (value?.statuses) {
         return res.status(200).json({ received: true, statusUpdate: true });
       }
@@ -45,12 +82,10 @@ export default async function handler(req, res) {
       const text = msg?.text?.body || "";
       const profileName = value?.contacts?.[0]?.profile?.name || "Paciente";
 
-      // 🧠 NLU con Gemini
+      // NLU
       const nlu = await handleMessage(text);
 
-      let reply = "";
-
-      // 🎨 Variaciones de saludo y cierre
+      // Variaciones de saludo/cierre
       const saludos = [
         `Hola ${profileName} 👋`,
         `¡Qué gusto verte, ${profileName}!`,
@@ -64,18 +99,34 @@ export default async function handler(req, res) {
         "¡Hasta pronto!"
       ];
 
-      // 📌 Manejo de estado: si hay un flujo pendiente
+      // Instrucciones (actualizadas a consulta por cédula)
+      const instrucciones = `Puedes decir:
+- “crear cita para mañana 10am a nombre de Ana”
+- “consultar cédula 1802525254”
+- “actualizar 1802525254 a confirmada”`;
+
+      let reply = "";
+
+      // Si hay flujo pendiente y el intent actual NO es crear_cita, intentamos completar
       if (conversationState[from] && nlu.intent !== "crear_cita") {
         const prev = conversationState[from];
-        // Combinar datos nuevos con los anteriores
-        const combinedData = { ...prev.data, ...nlu.data };
+        const manualData = parseManualData(text);
+        const combinedData = {
+          ...prev.data,
+          ...Object.fromEntries(Object.entries(nlu.data || {}).filter(([_, v]) => v)),
+          ...manualData
+        };
 
-        // Verificar si ya tenemos todos los campos requeridos
-        const requiredFields = ["nombre_paciente", "numero_cedula", "nombre_contacto", "celular_contacto", "fecha_cita"];
-        const missing = requiredFields.filter(f => !combinedData[f] || combinedData[f].trim() === "");
+        const requiredFields = [
+          "nombre_paciente",
+          "numero_cedula",
+          "nombre_contacto",
+          "celular_contacto",
+          "fecha_cita"
+        ];
+        const missing = requiredMissing(combinedData, requiredFields);
 
         if (missing.length === 0) {
-          // Crear la cita
           const numero_cita = await createAppointment({
             nombre_paciente: combinedData.nombre_paciente || profileName,
             numero_cedula: combinedData.numero_cedula || "",
@@ -86,14 +137,9 @@ export default async function handler(req, res) {
             observaciones: combinedData.observaciones || ""
           });
 
-          const saludo = saludos[Math.floor(Math.random() * saludos.length)];
-          const cierre = cierres[Math.floor(Math.random() * cierres.length)];
-          reply = `${saludo} Tu cita ha sido registrada con el número ${numero_cita}. ${cierre}`;
-
-          // Limpiar estado
+          reply = `${pickRandom(saludos)} Tu cita ha sido registrada con la cédula ${combinedData.numero_cedula} y número interno ${numero_cita}. ${pickRandom(cierres)}`;
           delete conversationState[from];
         } else {
-          // Actualizar estado y pedir lo que falta
           conversationState[from] = { intent: "crear_cita", data: combinedData };
           reply = `Aún me falta: ${missing.join(", ")}.`;
         }
@@ -102,55 +148,76 @@ export default async function handler(req, res) {
         return res.status(200).json({ received: true });
       }
 
-      // 🔹 Procesamiento según intención
+      // Switch principal
       switch (nlu.intent) {
         case "crear_cita": {
-          if (nlu.missing?.length > 0) {
-            // Guardar estado pendiente
-            conversationState[from] = { intent: "crear_cita", data: nlu.data };
-            reply = `📋 ${profileName}, para agendar necesito: ${nlu.missing.join(", ")}.`;
+          const manualData = parseManualData(text);
+          const mergedData = { ...(nlu.data || {}), ...manualData };
+
+          const requiredFields = [
+            "nombre_paciente",
+            "numero_cedula",
+            "nombre_contacto",
+            "celular_contacto",
+            "fecha_cita"
+          ];
+          const missing = requiredMissing(mergedData, requiredFields);
+
+          if (missing.length > 0) {
+            conversationState[from] = { intent: "crear_cita", data: mergedData };
+            reply = `📋 ${profileName}, para agendar necesito: ${missing.join(", ")}.`;
           } else {
             const numero_cita = await createAppointment({
-              nombre_paciente: nlu.data?.nombre_paciente || profileName,
-              numero_cedula: nlu.data?.numero_cedula || "",
-              nombre_contacto: nlu.data?.nombre_contacto || profileName,
-              celular_contacto: nlu.data?.celular_contacto || from,
-              fecha_cita: nlu.data?.fecha_cita || "",
+              nombre_paciente: mergedData.nombre_paciente || profileName,
+              numero_cedula: mergedData.numero_cedula || "",
+              nombre_contacto: mergedData.nombre_contacto || profileName,
+              celular_contacto: mergedData.celular_contacto || from,
+              fecha_cita: mergedData.fecha_cita || "",
               status_cita: "pendiente",
-              observaciones: nlu.data?.observaciones || ""
+              observaciones: mergedData.observaciones || ""
             });
 
-            const saludo = saludos[Math.floor(Math.random() * saludos.length)];
-            const cierre = cierres[Math.floor(Math.random() * cierres.length)];
-            reply = `${saludo} Tu cita ha sido registrada con el número ${numero_cita}. ${cierre}`;
+            reply = `${pickRandom(saludos)} Tu cita ha sido registrada con la cédula ${mergedData.numero_cedula} y número interno ${numero_cita}. ${pickRandom(cierres)}`;
           }
           break;
         }
 
         case "consultar_cita": {
-          const id = nlu.data?.numero_cita || "";
-          if (!id) {
-            reply = `Por favor envíame el número de cita para consultarla. Ej: consultar 123456`;
+          // Ahora consultamos por cédula
+          const cedula =
+            nlu.data?.numero_cedula || parseManualData(text).numero_cedula || "";
+
+          if (!cedula) {
+            reply = `Por favor envíame la cédula para consultar la cita. Ej: consultar cédula 1802525254`;
             break;
           }
-          const cita = await findAppointmentById(id);
+
+          // Requiere que en lib/sheets.js exista findAppointmentByCedula(cedula)
+          const cita = await findAppointmentByCedula(cedula);
+
           reply = cita
-            ? `📄 Cita ${id}:\n- Paciente: ${cita.nombre_paciente}\n- Fecha: ${cita.fecha_cita}\n- Estado: ${cita.status_cita}\n- Obs: ${cita.observaciones || "N/A"}`
-            : `⚠️ No encontré la cita ${id}.`;
+            ? `📄 Cita de ${cita.nombre_paciente}:\n- Fecha: ${cita.fecha_cita}\n- Estado: ${cita.status_cita}\n- Obs: ${cita.observaciones || "N/A"}`
+            : `⚠️ No encontré ninguna cita con la cédula ${cedula}.`;
           break;
         }
 
         case "actualizar_estado": {
-          const id = nlu.data?.numero_cita || "";
+          // Actualizamos por cédula
+          const cedula =
+            nlu.data?.numero_cedula || parseManualData(text).numero_cedula || "";
           const nuevo = nlu.data?.status_cita || "";
-          if (!id || !nuevo) {
-            reply = `Indica número de cita y nuevo estado. Ej: actualizar 123456 a confirmada`;
+
+          if (!cedula || !nuevo) {
+            reply = `Indica cédula y nuevo estado. Ej: actualizar 1802525254 a confirmada`;
             break;
           }
-          const ok = await updateAppointmentStatus(id, nuevo);
+
+          // Requiere que en lib/sheets.js exista updateAppointmentStatusByCedula(cedula, estado)
+          const ok = await updateAppointmentStatusByCedula(cedula, nuevo);
+
           reply = ok
-            ? `✅ Estado de la cita ${id} actualizado a: ${nuevo}.`
-            : `⚠️ No pude actualizar la cita ${id}. Verifica el número.`;
+            ? `✅ Estado de la cita con cédula ${cedula} actualizado a: ${nuevo}.`
+            : `⚠️ No pude actualizar la cita con cédula ${cedula}. Verifica si existe.`;
           break;
         }
 
@@ -160,25 +227,21 @@ export default async function handler(req, res) {
             `Gestiono tus citas médicas de forma rápida y sencilla.`,
             `Estoy aquí para agendar, consultar o modificar tus citas.`
           ];
-          const instrucciones = `Puedes decir:
-- “crear cita para mañana 10am a nombre de Ana”
-- “consultar 123456”
-- “actualizar 123456 a confirmada”`;
 
-          const saludo = saludos[Math.floor(Math.random() * saludos.length)];
-          reply = `${saludo} ${ayudas[Math.floor(Math.random() * ayudas.length)]}\n${instrucciones}`;
+          reply = `${pickRandom(saludos)} ${pickRandom(ayudas)}
+${instrucciones}`;
         }
       }
 
       await sendWhatsAppText(from, reply);
       return res.status(200).json({ received: true });
-
     } catch (err) {
       console.error("💥 Webhook error:", err);
       return res.status(500).json({ error: "Internal error" });
     }
   }
 
+  // Otros métodos
   return res.status(405).json({ error: "Method not allowed" });
 }
 
