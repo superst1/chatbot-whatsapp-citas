@@ -183,7 +183,7 @@ export default async function handler(req, res) {
         }
 
         case "consultar_cita": {
-          // Ahora consultamos por cédula
+          // Consultamos por cédula
           const cedula =
             nlu.data?.numero_cedula || parseManualData(text).numero_cedula || "";
 
@@ -192,7 +192,6 @@ export default async function handler(req, res) {
             break;
           }
 
-          // Requiere que en lib/sheets.js exista findAppointmentByCedula(cedula)
           const cita = await findAppointmentByCedula(cedula);
 
           reply = cita
@@ -212,7 +211,6 @@ export default async function handler(req, res) {
             break;
           }
 
-          // Requiere que en lib/sheets.js exista updateAppointmentStatusByCedula(cedula, estado)
           const ok = await updateAppointmentStatusByCedula(cedula, nuevo);
 
           reply = ok
