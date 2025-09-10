@@ -34,9 +34,26 @@ router.get('/', (req, res) => {
 
 // Mensajes entrantes
 router.post('/', async (req, res) => {
+  // ===================== INICIO DEL CÓDIGO DE DEPURACIÓN =====================
+  // Imprimiremos en la consola el cuerpo completo de la solicitud que llega.
+  console.log('==================================================');
+  console.log('RECIBIDO NUEVO WEBHOOK EN:', new Date().toISOString());
+  console.log('--- CUERPO DE LA SOLICITUD (req.body) ---');
+  // Usamos JSON.stringify para mostrar el objeto completo, incluso si es complejo.
+  console.log(JSON.stringify(req.body, null, 2));
+  console.log('--------------------------------------------------');
+  // ====================== FIN DEL CÓDIGO DE DEPURACIÓN =======================
+
   try {
     const { from, text } = normalizeIncoming(req.body);
-    if (!from || !text) return res.sendStatus(200);
+    
+    // Log para ver qué extrajo la función normalizeIncoming
+    console.log(`[DATOS NORMALIZADOS] From: ${from}, Text: ${text}`);
+
+    if (!from || !text) {
+      console.log('--> Saliendo temprano: "from" o "text" no se encontraron en el payload.');
+      return res.sendStatus(200);
+    }
 
     const session = getSession(from);
     const msg = text.trim();
@@ -131,7 +148,10 @@ router.post('/', async (req, res) => {
 
     return res.sendStatus(200);
   } catch (e) {
+    // Este log nos mostrará si el error ocurre dentro del bloque try-catch
+    console.error('!!!!!!!!!! ERROR CAPTURADO EN EL MANEJADOR POST !!!!!!!!!!');
     console.error(e);
+    console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
     return res.sendStatus(200);
   }
 });
@@ -139,6 +159,8 @@ router.post('/', async (req, res) => {
 export default router;
 
 /* ===== Helpers ===== */
+
+// NO HAY CAMBIOS EN LAS FUNCIONES HELPERS DE AQUÍ HACIA ABAJO. SON LAS MISMAS.
 
 function normalizeIncoming(body) {
   const from = body?.from || body?.contacts?.[0]?.wa_id || body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
@@ -202,7 +224,7 @@ function normalizePhone(p) {
 function getMissing(draft, required) {
   return required.filter(k => !draft[k]);
 }
-//
+
 async function askForNextMissing(to, session, field) {
   const prompts = {
     nombre_paciente: '¿Cuál es el nombre completo del paciente?',
