@@ -42,17 +42,22 @@ router.post('/', async (req, res) => {
     const msg = text.trim();
     const { intent, entities } = await extractEntities(msg);
 
+    // Cancelar
     if (isCancel(msg) || intent === 'cancelar') {
       await handleCancel(from, session);
       return res.sendStatus(200);
     }
+
+    // Reagendar
     if (isReschedule(msg) || intent === 'reagendar') {
       await handleRescheduleInit(from, session);
       return res.sendStatus(200);
     }
 
+    // Actualizar datos con lo que detectamos
     applyEntitiesToSession(session, entities, from);
 
+    // Si está reagendando y espera fecha
     if (session.mode === 'reagendar:esperando_fecha') {
       if (!session.draft.fecha_cita) {
         await askForDate(from);
@@ -62,8 +67,10 @@ router.post('/', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // Si no hay flujo, iniciar agendar
     if (!session.mode) session.mode = 'agendar';
 
+    // Si hay fecha sin hora, sugerir horas
     const datePart = session.draft.fecha_cita ? session.draft.fecha_cita.slice(0, 10) : null;
     const timePart = session.draft.fecha_cita ? session.draft.fecha_cita.slice(11, 16) : null;
 
@@ -74,6 +81,7 @@ router.post('/', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // Si espera hora
     if (session.pending?.expect === 'hora') {
       const chosen = parseHourChoice(msg, session.pending.options);
       if (!chosen) {
@@ -84,12 +92,14 @@ router.post('/', async (req, res) => {
       session.pending = null;
     }
 
+    // Pedir campos faltantes
     const missing = getMissing(session.draft, REQUIRED_FIELDS);
     if (missing.length > 0) {
       await askForNextMissing(from, session, missing[0]);
       return res.sendStatus(200);
     }
 
+    // Observaciones opcionales
     if (!session.draft.observaciones) {
       session.pending = { expect: 'observaciones' };
       await sendText(from, '¿Motivo de la cita? (ej: “mi hijo tiene gripe”). O escribe “omitir”.');
@@ -100,12 +110,14 @@ router.post('/', async (req, res) => {
       session.pending = null;
     }
 
+    // Confirmación
     if (!session.pending?.expect) {
       session.pending = { expect: 'confirmacion' };
       await sendConfirmation(from, session.draft);
       return res.sendStatus(200);
     }
 
+    // Procesar confirmación
     if (session.pending?.expect === 'confirmacion') {
       if (isYes(msg)) {
         await finalizeCreate(from, session);
@@ -190,7 +202,7 @@ function normalizePhone(p) {
 function getMissing(draft, required) {
   return required.filter(k => !draft[k]);
 }
-
+//
 async function askForNextMissing(to, session, field) {
   const prompts = {
     nombre_paciente: '¿Cuál es el nombre completo del paciente?',
@@ -360,6 +372,3 @@ async function getAvailableTimes(dateISOYYYYMMDD) {
   }
   return slots;
 }
-console.log('Exportando router:', router);
-export default router;
-                                                 
