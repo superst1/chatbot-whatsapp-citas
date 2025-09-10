@@ -235,10 +235,6 @@ function isYes(t) {
   return /\b(s[ií]|claro|confirmo|ok|dale)\b/i.test(t);
 }
 
-function isYes(t) {
-  return /\b(s[ií]|claro|confirmo|ok|dale)\b/i.test(t);
-}
-
 function isNo(t) {
   return /\b(no|mejor no|aún no)\b/i.test(t);
 }
