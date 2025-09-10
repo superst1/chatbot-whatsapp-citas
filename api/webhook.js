@@ -360,4 +360,6 @@ async function getAvailableTimes(dateISOYYYYMMDD) {
   }
   return slots;
 }
+console.log('Exportando router:', router);
+export default router;
                                                  
