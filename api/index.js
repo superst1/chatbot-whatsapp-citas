@@ -3,6 +3,7 @@ import bodyParser from 'body-parser';
 import router from './webhook.js';
 
 const app = express();
+console.log('Router importado:', router);
 app.use(bodyParser.json({ limit: '2mb' }));
 
 app.use('/webhook', router);
